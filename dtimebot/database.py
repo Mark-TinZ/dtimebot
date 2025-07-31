@@ -47,6 +47,9 @@ def start():
 async def update_models():
 	logger.info('Updating models...')
 	global Base
+
+	from dtimebot import models
+
 	async with engine.begin() as conn:
 		await conn.run_sync(Base.metadata.create_all)
 	logger.info('Models updated')

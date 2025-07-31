@@ -1,9 +1,7 @@
 from typing import Optional
 from sqlalchemy import Integer, BigInteger, DateTime
 from sqlalchemy.sql import func
-from sqlalchemy.orm import mapped_column
-from sqlalchemy.orm import Mapped
-
+from sqlalchemy.orm import mapped_column, Mapped
 from dtimebot.database import Base
 
 

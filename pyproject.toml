@@ -1,13 +1,14 @@
 [project]
-name = "delegated-time-bot"
-version = "0.1.0"
+name = "dtimebot"
+version = "0.1.1"
 description = "Бот для управыления задачами в Телеграм"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aiogram==3.21.0",
-    "apscheduler>=3.11.0",
-    "pydantic>=2.11.7",
-    "pyyaml>=6.0.2",
-    "sqlalchemy>=2.0.41",
+	"aiogram==3.21.0",
+	"aiosqlite>=0.21.0",
+	"apscheduler>=3.11.0",
+	"pydantic>=2.11.7",
+	"pyyaml>=6.0.2",
+	"sqlalchemy>=2.0.41",
 ]

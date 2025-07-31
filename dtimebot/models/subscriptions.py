@@ -1,10 +1,9 @@
 from sqlalchemy import ForeignKey, Integer, String, DateTime, Boolean
 from sqlalchemy.sql import func
 from sqlalchemy.orm import mapped_column, Mapped
-
 from dtimebot.database import Base
-from dtimebot.users import User
-from dtimebot.directories import Directory
+from dtimebot.models.users import User
+from dtimebot.models.directories import Directory
 
 
 class Subscription(Base):
