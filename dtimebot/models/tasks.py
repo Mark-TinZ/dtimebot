@@ -7,18 +7,26 @@ from dtimebot.models.activities import ActivityEmbed
 from dtimebot.models.users import User
 from dtimebot.models.directories import Directory
 
+
 class Task(Base):
 	__tablename__ = 'task'
 
 	id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-	owner_id: Mapped[int] = mapped_column(ForeignKey(User.id))
+	owner_id: Mapped[int] = mapped_column(ForeignKey(User.id), nullable=False)
 	directory_id: Mapped[Optional[int]] = mapped_column(ForeignKey(Directory.id), nullable=True)
-	title: Mapped[str] = mapped_column(String(128))
+	title: Mapped[str] = mapped_column(String(128), nullable=False)
 	description: Mapped[Optional[str]] = mapped_column(String(256))
-	time_start: Mapped[DateTime] = mapped_column(DateTime)
+	time_start: Mapped[Optional[DateTime]] = mapped_column(DateTime)
 	time_end: Mapped[Optional[DateTime]] = mapped_column(DateTime)
-	embed: Mapped[ActivityEmbed] = mapped_column(JSONModel(ActivityEmbed))
+	embed: Mapped[Optional[ActivityEmbed]] = mapped_column(JSONModel(ActivityEmbed), nullable=True)
 	created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
 
 	owner: Mapped[User] = relationship()
-	directory: Mapped[Optional[Directory]] = relationship() # Можно добавить relationship, если нужно
+	directory: Mapped[Optional[Directory]] = relationship()
+
+class TaskTag(Base):
+	__tablename__ = 'task_tag'
+
+	id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+	task_id: Mapped[int] = mapped_column(ForeignKey(Task.id), nullable=False)
+	tag: Mapped[str] = mapped_column(String(64), nullable=False)

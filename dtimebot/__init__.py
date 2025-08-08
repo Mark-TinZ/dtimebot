@@ -5,7 +5,7 @@ async def start():
 	main_logger.info("Starting dtimebot...")
 	configs.load_configs()
 	scheduling.start()
-	database.start()
+	await database.start()
 	await database.update_models()
 	await bot.start()
 	main_logger.info("dtimebot started")

@@ -1,19 +1,17 @@
-# dtimebot/bot/handlers.py
-"""
-Обработчики команд бота.
-"""
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
-from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery
+
+from sqlalchemy import select
+from dtimebot.database import LocalSession
 
 from dtimebot.logs import main_logger
 from dtimebot.models.users import User
 from dtimebot.services import user_service, directory_service, task_service
+
 
 logger = main_logger.getChild('bot.handlers')
 
@@ -326,36 +324,19 @@ async def on_help(message: Message):
 	)
 	await message.answer(help_text)
 
-@router.message(Command("me"))
+@router.message(Command('me'))
 async def on_me(message: Message):
-	"""Обработчик команды /me. Показывает информацию о пользователе."""
-	user_telegram_id = message.from_user.id
-	user_full_name = message.from_user.full_name or ""
-	user_username = message.from_user.username or ""
+    try:
+        # В user_service реализована логика get_or_create_user
+        user = await user_service.get_or_create_user(message.from_user)
+        if user is None:
+            await message.answer("Не удалось получить информацию о пользователе.")
+            return
 
-	try:
-		async with LocalSession() as session:
-			stmt = select(User).where(User.telegram_id == user_telegram_id)
-			result = await session.execute(stmt)
-			user = result.scalar_one_or_none()
-
-		if user:
-			me_text = (
-				f"Ваша информация:\n"
-				f"ID в системе: {user.id}\n"
-				f"Telegram ID: {user.telegram_id}\n"
-				f"Полное имя: {user_full_name}\n"
-				f"Имя пользователя: @{user_username if user_username else 'Не указано'}\n"
-				f"Зарегистрирован: {user.created_at.strftime('%d.%m.%Y %H:%M:%S') if user.created_at else 'Неизвестно'}\n"
-			)
-			if user.deleted_at:
-				me_text += f"Удален: {user.deleted_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
-		else:
-			me_text = "Вы еще не зарегистрированы. Используйте /start для регистрации."
-
-		await message.answer(me_text)
-	except Exception as e:
-		logger.error(f"Ошибка при получении информации о пользователе {user_telegram_id}: {e}", exc_info=True)
-		await message.answer("Произошла ошибка при получении вашей информации.")
-
-# ... (остальные общие обработчики)
+        # Получаем директории пользователя
+        dirs = await directory_service.get_user_directories(message.from_user.id)
+        text = f"Пользователь: {message.from_user.full_name}\nID в системе: {user.id}\nДиректорий: {len(dirs)}"
+        await message.answer(text)
+    except Exception as e:
+        logger.exception("Error while retrieving user information for Telegram ID %s: %s", message.from_user.id, e)
+        await message.answer("Произошла ошибка при выполнении /me.")

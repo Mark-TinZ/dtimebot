@@ -1,53 +1,38 @@
-from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
-#from sqlalchemy.ext.asyncio import AsyncSession
-from dtimebot.database import Base
+
+from dtimebot.database import get_session
 from dtimebot.models.users import User
 from dtimebot.logs import main_logger
-
-if TYPE_CHECKING:
-	from sqlalchemy.ext.asyncio import AsyncSession
+from dtimebot.services.directory_service import create_directory
 
 logger = main_logger.getChild('user_service')
 
-# Функция будет использовать LocalSession, импортируя его внутри функции
-async def get_or_create_user(telegram_id: int, full_name: str = "", username: str = "") -> User:
-	"""Получает пользователя из БД или создает нового."""
-	try:
-		# Импортируем LocalSession внутри функции, чтобы избежать проблем с инициализацией
-		from dtimebot.database import LocalSession
-		
-		# Проверяем, что LocalSession не None (на всякий случай)
-		if LocalSession is None:
-			logger.critical("LocalSession is None. Database might not be initialized properly.")
-			raise RuntimeError("Database session is not available.")
+async def get_or_create_user(tg_user) -> User | None:
+    """
+    tg_user — объект aiogram.from_user (или подобный), должен иметь id, first_name, username и т.д.
+    """
+    try:
+        async with get_session() as session:
+            stmt = select(User).where(User.telegram_id == tg_user.id)
+            res = await session.execute(stmt)
+            user = res.scalar_one_or_none()
+            if user:
+                return user
 
-		async with LocalSession() as session: # type: ignore
-			# Проверяем, существует ли пользователь
-			stmt = select(User).where(User.telegram_id == telegram_id)
-			result = await session.execute(stmt)
-			user = result.scalar_one_or_none()
+            user = User(
+                telegram_id=tg_user.id
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
 
-			if user is None:
-				# Создаем нового пользователя
-				logger.info(f"Creating a new user with telegram_id={telegram_id}")
-				user = User(
-					telegram_id=telegram_id,
-					# В текущей модели нет полей full_name и username, но можно добавить позже
-				)
-				session.add(user)
-				await session.commit()
-				await session.refresh(user) # Обновляем объект, чтобы получить id
-				logger.info(f"A user with telegram_id={telegram_id} has been successfully created with ID={user.id}.")
-			else:
-				logger.info(f"A user with telegram_id={telegram_id} already exists with ID={user.id}.")
+            logger.info("Creating a new user with telegram_id=%s", tg_user.id)
 
-			return user
-	except SQLAlchemyError as e:
-		logger.error(f"SQLAlchemy error occurred while processing user {telegram_id}: {e}", exc_info=True)
-		# Можно пробросить исключение выше или вернуть None/дефолтное значение
-		raise
-	except Exception as e:
-		logger.error(f"An unexpected error occurred while processing user {telegram_id}: {e}", exc_info=True)
-		raise
+            # Создаём личную директорию (self) для пользователя
+            await create_directory(telegram_id=tg_user.id, name='Моя директория', description='Личная директория', owner_user=user, is_self=True)
+
+            return user
+    except SQLAlchemyError as e:
+        logger.exception("Error creating/getting user %s: %s", getattr(tg_user, 'id', 'unknown'), e)
+        return None

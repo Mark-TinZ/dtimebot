@@ -37,11 +37,7 @@ async def on_hello(message: Message, command: CommandObject):
 	user_username = message.from_user.username or ""
 
 	try:
-		user = await user_service.get_or_create_user(
-			telegram_id=user_telegram_id,
-			full_name=user_full_name,
-			username=user_username
-		)
+		user = await user_service.get_or_create_user(message.from_user)
 		greeting_text = (
 			f"Привет, {user_full_name}!\n"
 			f"Имя пользователя: @{user_username if user_username else 'Не указано'}\n"
@@ -50,7 +46,7 @@ async def on_hello(message: Message, command: CommandObject):
 		)
 		await message.answer(greeting_text)
 	except Exception as e:
-		logger.error(f"Ошибка при регистрации пользователя {user_telegram_id}: {e}", exc_info=True)
+		logger.error(f"Error while registering user {user_telegram_id}: {e}", exc_info=True)
 		await message.answer("Произошла ошибка при регистрации. Пожалуйста, попробуйте позже.")
 
 async def start():
