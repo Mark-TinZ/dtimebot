@@ -10,6 +10,7 @@ class Invitation(Base):
 
 	id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 	owner_id: Mapped[int] = mapped_column(ForeignKey(User.id))
+	directory_id: Mapped[int] = mapped_column(ForeignKey('directory.id'))
 	filter: Mapped[Optional[str]] = mapped_column(String(128))
 	valid_until: Mapped[Optional[DateTime]] = mapped_column(DateTime)
 	max_uses: Mapped[Optional[int]] = mapped_column(Integer)

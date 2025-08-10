@@ -2,8 +2,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List
 
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from typing import List
+
 from dtimebot.database import get_session
-from dtimebot.models.directories import Directory
+from dtimebot.models.directories import Directory, DirectoryTag
 from dtimebot.models.members import Member
 from dtimebot.models.users import User
 from dtimebot.logs import main_logger
@@ -106,7 +110,7 @@ async def add_tag_to_directory(owner_telegram_id: int, directory_id: int, tag: s
 	:return: True, если успешно, иначе False.
 	"""
 	try:
-		async with LocalSession() as session:
+		async with get_session() as session:
 			# Найти пользователя
 			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
 			result_user = await session.execute(stmt_user)
@@ -160,7 +164,7 @@ async def remove_tag_from_directory(owner_telegram_id: int, directory_id: int, t
 	:return: True, если успешно, иначе False.
 	"""
 	try:
-		async with LocalSession() as session:
+		async with get_session() as session:
 			# Найти пользователя
 			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
 			result_user = await session.execute(stmt_user)
@@ -212,7 +216,7 @@ async def get_directory_tags(owner_telegram_id: int, directory_id: int) -> List[
 	:return: Список тегов.
 	"""
 	try:
-		async with LocalSession() as session:
+		async with get_session() as session:
 			# Найти пользователя
 			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
 			result_user = await session.execute(stmt_user)
@@ -253,7 +257,7 @@ async def get_user_directories_by_tag(owner_telegram_id: int, tag: str) -> List[
 	:return: Список объектов Directory.
 	"""
 	try:
-		async with LocalSession() as session:
+		async with get_session() as session:
 			# Найти пользователя
 			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
 			result_user = await session.execute(stmt_user)
@@ -281,3 +285,80 @@ async def get_user_directories_by_tag(owner_telegram_id: int, tag: str) -> List[
 	except Exception as e:
 		logger.error(f"Неожиданная ошибка при фильтрации директорий по тегу '{tag}' для {owner_telegram_id}: {e}", exc_info=True)
 		return []
+
+async def update_directory(owner_telegram_id: int, directory_id: int, name: str = None, description: str = None) -> bool:
+	"""
+	Обновляет информацию о директории.
+	:param owner_telegram_id: Telegram ID владельца директории.
+	:param directory_id: ID директории.
+	:param name: Новое название (None = не изменять).
+	:param description: Новое описание (None = не изменять).
+	:return: True, если успешно, иначе False.
+	"""
+	try:
+		async with get_session() as session:
+			# Найти пользователя
+			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
+			result_user = await session.execute(stmt_user)
+			user = result_user.scalar_one_or_none()
+
+			if not user:
+				logger.warning(f"Пользователь с telegram_id={owner_telegram_id} не найден.")
+				return False
+
+			# Найти директорию, принадлежащую этому пользователю
+			stmt_dir = select(Directory).where(Directory.id == directory_id, Directory.owner_id == user.id)
+			result_dir = await session.execute(stmt_dir)
+			directory = result_dir.scalar_one_or_none()
+
+			if not directory:
+				logger.warning(f"Директория с ID={directory_id} не найдена или не принадлежит пользователю {owner_telegram_id}.")
+				return False
+
+			# Обновляем поля
+			if name is not None:
+				directory.name = name
+			if description is not None:
+				directory.description = description
+
+			await session.commit()
+			logger.info(f"Директория {directory_id} обновлена пользователем {owner_telegram_id}.")
+			return True
+
+	except SQLAlchemyError as e:
+		logger.error(f"Ошибка SQLAlchemy при обновлении директории {directory_id}: {e}", exc_info=True)
+		return False
+	except Exception as e:
+		logger.error(f"Неожиданная ошибка при обновлении директории {directory_id}: {e}", exc_info=True)
+		return False
+
+async def get_directory_by_id(owner_telegram_id: int, directory_id: int) -> Directory | None:
+	"""
+	Получает директорию по ID с проверкой прав доступа.
+	:param owner_telegram_id: Telegram ID владельца.
+	:param directory_id: ID директории.
+	:return: Объект Directory или None.
+	"""
+	try:
+		async with get_session() as session:
+			# Найти пользователя
+			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
+			result_user = await session.execute(stmt_user)
+			user = result_user.scalar_one_or_none()
+
+			if not user:
+				return None
+
+			# Найти директорию
+			stmt_dir = select(Directory).where(Directory.id == directory_id, Directory.owner_id == user.id)
+			result_dir = await session.execute(stmt_dir)
+			directory = result_dir.scalar_one_or_none()
+
+			return directory
+
+	except SQLAlchemyError as e:
+		logger.error(f"Ошибка SQLAlchemy при получении директории {directory_id}: {e}", exc_info=True)
+		return None
+	except Exception as e:
+		logger.error(f"Неожиданная ошибка при получении директории {directory_id}: {e}", exc_info=True)
+		return None

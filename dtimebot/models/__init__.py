@@ -1,10 +1,7 @@
-from .access_rules import *
-from .activities import *
-# from .activity_tags import *
-from .directories import *
-from .directory_tags import *
-from .invitations import *
-from .members import *
-from .subscriptions import *
-from .tasks import *
-from .users import *
+# Импортируем все модели для автоматического создания таблиц
+from .users import User
+from .directories import Directory, DirectoryTag
+from .tasks import Task, TaskTag
+from .invitations import Invitation
+from .members import Member, MemberTag
+from .activities import Activity, ActivityTag, ActivityEmbed

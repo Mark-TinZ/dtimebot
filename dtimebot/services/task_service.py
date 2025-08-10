@@ -95,7 +95,7 @@ async def delete_task(owner_telegram_id: int, task_id: int) -> bool:
 	:return: True, если успешно удалено, иначе False.
 	"""
 	try:
-		async with LocalSession() as session:
+		async with get_session() as session:
 			# Найти пользователя
 			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
 			result_user = await session.execute(stmt_user)
@@ -136,7 +136,7 @@ async def add_tag_to_task(owner_telegram_id: int, task_id: int, tag: str) -> boo
 	:return: True, если успешно, иначе False.
 	"""
 	try:
-		async with LocalSession() as session:
+		async with get_session() as session:
 			# Найти пользователя
 			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
 			result_user = await session.execute(stmt_user)
@@ -158,7 +158,7 @@ async def add_tag_to_task(owner_telegram_id: int, task_id: int, tag: str) -> boo
 
 			# Проверить, существует ли уже такой тег
 			stmt_tag_check = select(TaskTag).where(
-				TaskTag.activity_id == task_id, # activity_id == task_id
+				TaskTag.task_id == task_id,
 				TaskTag.tag == tag
 			)
 			result_tag_check = await session.execute(stmt_tag_check)
@@ -169,7 +169,7 @@ async def add_tag_to_task(owner_telegram_id: int, task_id: int, tag: str) -> boo
 				return True
 
 			# Добавить тег
-			new_tag = TaskTag(activity_id=task_id, tag=tag) # Используем TaskTag
+			new_tag = TaskTag(task_id=task_id, tag=tag)
 			session.add(new_tag)
 			await session.commit()
 			logger.info(f"Tag '{tag}' added to task {task_id}.")
@@ -191,7 +191,7 @@ async def remove_tag_from_task(owner_telegram_id: int, task_id: int, tag: str) -
 	:return: True, если успешно, иначе False.
 	"""
 	try:
-		async with LocalSession() as session:
+		async with get_session() as session:
 			# Найти пользователя
 			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
 			result_user = await session.execute(stmt_user)
@@ -212,7 +212,7 @@ async def remove_tag_from_task(owner_telegram_id: int, task_id: int, tag: str) -
 
 			# Найти тег для удаления
 			stmt_tag = select(TaskTag).where(
-				TaskTag.activity_id == task_id,
+				TaskTag.task_id == task_id,
 				TaskTag.tag == tag
 			)
 			result_tag = await session.execute(stmt_tag)
@@ -243,7 +243,7 @@ async def get_task_tags(owner_telegram_id: int, task_id: int) -> List[str]:
 	:return: Список тегов.
 	"""
 	try:
-		async with LocalSession() as session:
+		async with get_session() as session:
 			# Найти пользователя
 			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
 			result_user = await session.execute(stmt_user)
@@ -263,7 +263,7 @@ async def get_task_tags(owner_telegram_id: int, task_id: int) -> List[str]:
 				return []
 
 			# Получить теги
-			stmt_tags = select(TaskTag.tag).where(TaskTag.activity_id == task_id)
+			stmt_tags = select(TaskTag.tag).where(TaskTag.task_id == task_id)
 			result_tags = await session.execute(stmt_tags)
 			tags = [row[0] for row in result_tags.fetchall()]
 			logger.info(f"Tags retrieved for task {task_id}: {tags}")
@@ -284,7 +284,7 @@ async def get_user_tasks_by_tag(owner_telegram_id: int, tag: str) -> List[Task]:
 	:return: Список объектов Task.
 	"""
 	try:
-		async with LocalSession() as session:
+		async with get_session() as session:
 			# Найти пользователя
 			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
 			result_user = await session.execute(stmt_user)
@@ -295,10 +295,9 @@ async def get_user_tasks_by_tag(owner_telegram_id: int, tag: str) -> List[Task]:
 				return []
 
 			# Найти задачи пользователя, у которых есть тег
-			# JOIN между Task (как Activity) и TaskTag
 			stmt_tasks = (
 				select(Task)
-				.join(TaskTag, Task.id == TaskTag.activity_id)
+				.join(TaskTag, Task.id == TaskTag.task_id)
 				.where(Task.owner_id == user.id, TaskTag.tag == tag)
 			)
 			result_tasks = await session.execute(stmt_tasks)
@@ -312,3 +311,93 @@ async def get_user_tasks_by_tag(owner_telegram_id: int, tag: str) -> List[Task]:
 	except Exception as e:
 		logger.error(f"Unexpected error while filtering tasks by tag '{tag}' for user {owner_telegram_id}: {e}", exc_info=True)
 		return []
+
+async def update_task(
+	owner_telegram_id: int, 
+	task_id: int, 
+	title: str = None, 
+	description: str = None,
+	time_start: datetime = None,
+	time_end: datetime = None
+) -> bool:
+	"""
+	Обновляет информацию о задаче.
+	:param owner_telegram_id: Telegram ID владельца задачи.
+	:param task_id: ID задачи.
+	:param title: Новое название (None = не изменять).
+	:param description: Новое описание (None = не изменять).
+	:param time_start: Новое время начала (None = не изменять).
+	:param time_end: Новое время окончания (None = не изменять).
+	:return: True, если успешно, иначе False.
+	"""
+	try:
+		async with get_session() as session:
+			# Найти пользователя
+			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
+			result_user = await session.execute(stmt_user)
+			user = result_user.scalar_one_or_none()
+
+			if not user:
+				logger.warning(f"User with telegram_id={owner_telegram_id} not found.")
+				return False
+
+			# Найти задачу, принадлежащую этому пользователю
+			stmt_task = select(Task).where(Task.id == task_id, Task.owner_id == user.id)
+			result_task = await session.execute(stmt_task)
+			task = result_task.scalar_one_or_none()
+
+			if not task:
+				logger.warning(f"Task with ID={task_id} not found or does not belong to user {owner_telegram_id}.")
+				return False
+
+			# Обновляем поля
+			if title is not None:
+				task.title = title
+			if description is not None:
+				task.description = description
+			if time_start is not None:
+				task.time_start = time_start
+			if time_end is not None:
+				task.time_end = time_end
+
+			await session.commit()
+			logger.info(f"Task {task_id} updated by user {owner_telegram_id}.")
+			return True
+
+	except SQLAlchemyError as e:
+		logger.error(f"SQLAlchemy error while updating task {task_id}: {e}", exc_info=True)
+		return False
+	except Exception as e:
+		logger.error(f"Unexpected error while updating task {task_id}: {e}", exc_info=True)
+		return False
+
+async def get_task_by_id(owner_telegram_id: int, task_id: int) -> Task | None:
+	"""
+	Получает задачу по ID с проверкой прав доступа.
+	:param owner_telegram_id: Telegram ID владельца.
+	:param task_id: ID задачи.
+	:return: Объект Task или None.
+	"""
+	try:
+		async with get_session() as session:
+			# Найти пользователя
+			stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
+			result_user = await session.execute(stmt_user)
+			user = result_user.scalar_one_or_none()
+
+			if not user:
+				return None
+
+			# Найти задачу
+			stmt_task = select(Task).where(Task.id == task_id, Task.owner_id == user.id)
+			result_task = await session.execute(stmt_task)
+			task = result_task.scalar_one_or_none()
+
+			return task
+
+	except SQLAlchemyError as e:
+		logger.error(f"SQLAlchemy error while getting task {task_id}: {e}", exc_info=True)
+		return None
+	except Exception as e:
+		logger.error(f"Unexpected error while getting task {task_id}: {e}", exc_info=True)
+		return None
