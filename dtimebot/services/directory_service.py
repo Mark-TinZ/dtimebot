@@ -231,7 +231,7 @@ async def remove_tag_from_directory(owner_telegram_id: int, directory_id: int, t
 async def get_directory_tags(owner_telegram_id: int, directory_id: int) -> List[str]:
 	"""
 	Получает список тегов директории.
-	:param owner_telegram_id: Telegram ID владельца директории.
+	:param owner_telegram_id: Telegram ID пользователя (владельца или участника).
 	:param directory_id: ID директории.
 	:return: Список тегов.
 	"""
@@ -246,13 +246,21 @@ async def get_directory_tags(owner_telegram_id: int, directory_id: int) -> List[
 				logger.warning(f"Пользователь с telegram_id={owner_telegram_id} не найден.")
 				return []
 
-			# Найти директорию, принадлежащую этому пользователю
-			stmt_dir = select(Directory).where(Directory.id == directory_id, Directory.owner_id == user.id)
-			result_dir = await session.execute(stmt_dir)
-			directory = result_dir.scalar_one_or_none()
+			# Проверить, что пользователь имеет доступ к директории (владелец или участник)
+			from dtimebot.models.members import Member
+			stmt_access = (
+				select(Directory)
+				.outerjoin(Member, (Member.directory_id == Directory.id) & (Member.user_id == user.id) & (Member.is_active == True))
+				.where(
+					(Directory.id == directory_id) & 
+					((Directory.owner_id == user.id) | (Member.user_id == user.id))
+				)
+			)
+			result_access = await session.execute(stmt_access)
+			directory = result_access.scalar_one_or_none()
 
 			if not directory:
-				logger.warning(f"Директория с ID={directory_id} не найдена или не принадлежит пользователю {owner_telegram_id}.")
+				logger.warning(f"Директория с ID={directory_id} не найдена или пользователь {owner_telegram_id} не имеет к ней доступа.")
 				return []
 
 			# Получить теги
@@ -272,7 +280,7 @@ async def get_directory_tags(owner_telegram_id: int, directory_id: int) -> List[
 async def get_user_directories_by_tag(owner_telegram_id: int, tag: str) -> List[Directory]:
 	"""
 	Получает список директорий пользователя, у которых есть указанный тег.
-	:param owner_telegram_id: Telegram ID владельца.
+	:param owner_telegram_id: Telegram ID пользователя (владельца или участника).
 	:param tag: Тег для фильтрации.
 	:return: Список объектов Directory.
 	"""
@@ -287,17 +295,27 @@ async def get_user_directories_by_tag(owner_telegram_id: int, tag: str) -> List[
 				logger.warning(f"Пользователь с telegram_id={owner_telegram_id} не найден.")
 				return []
 
-			# Найти директории пользователя, у которых есть тег
-			# Это требует JOIN между Directory и DirectoryTag
+			# Найти директории пользователя (владельца или участника), у которых есть тег
+			from dtimebot.models.members import Member
 			stmt_dirs = (
 				select(Directory)
 				.join(DirectoryTag, Directory.id == DirectoryTag.directory_id)
-				.where(Directory.owner_id == user.id, DirectoryTag.tag == tag)
+				.outerjoin(Member, (Member.directory_id == Directory.id) & (Member.user_id == user.id) & (Member.is_active == True))
+				.where(
+					DirectoryTag.tag == tag,
+					((Directory.owner_id == user.id) | (Member.user_id == user.id))
+				)
 			)
 			result_dirs = await session.execute(stmt_dirs)
 			directories = list(result_dirs.scalars().all())
-			logger.info(f"Найдено {len(directories)} директорий с тегом '{tag}' для пользователя {owner_telegram_id}.")
-			return directories
+			
+			# Убираем дубли
+			unique_dirs = {}
+			for directory in directories:
+				unique_dirs[directory.id] = directory
+			
+			logger.info(f"Найдено {len(unique_dirs)} директорий с тегом '{tag}' для пользователя {owner_telegram_id}.")
+			return list(unique_dirs.values())
 
 	except SQLAlchemyError as e:
 		logger.error(f"Ошибка SQLAlchemy при фильтрации директорий по тегу '{tag}' для {owner_telegram_id}: {e}", exc_info=True)
@@ -355,7 +373,7 @@ async def update_directory(owner_telegram_id: int, directory_id: int, name: str 
 async def get_directory_by_id(owner_telegram_id: int, directory_id: int) -> Directory | None:
 	"""
 	Получает директорию по ID с проверкой прав доступа.
-	:param owner_telegram_id: Telegram ID владельца.
+	:param owner_telegram_id: Telegram ID пользователя (владельца или участника).
 	:param directory_id: ID директории.
 	:return: Объект Directory или None.
 	"""
@@ -369,8 +387,16 @@ async def get_directory_by_id(owner_telegram_id: int, directory_id: int) -> Dire
 			if not user:
 				return None
 
-			# Найти директорию
-			stmt_dir = select(Directory).where(Directory.id == directory_id, Directory.owner_id == user.id)
+			# Найти директорию с проверкой прав доступа (владелец или участник)
+			from dtimebot.models.members import Member
+			stmt_dir = (
+				select(Directory)
+				.outerjoin(Member, (Member.directory_id == Directory.id) & (Member.user_id == user.id) & (Member.is_active == True))
+				.where(
+					(Directory.id == directory_id) & 
+					((Directory.owner_id == user.id) | (Member.user_id == user.id))
+				)
+			)
 			result_dir = await session.execute(stmt_dir)
 			directory = result_dir.scalar_one_or_none()
 

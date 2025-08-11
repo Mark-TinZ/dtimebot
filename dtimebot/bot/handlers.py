@@ -546,9 +546,18 @@ async def cmd_list_tasks(message: Message):
 		# Получим теги для отображения
 		tags = await task_service.get_task_tags(telegram_id, task_obj.id)
 		tags_str = ', '.join(tags) if tags else '-'
+		
+		# Получим информацию о директории
+		directory_name = "Личная"
+		if task_obj.directory_id:
+			directory = await directory_service.get_directory_by_id(telegram_id, task_obj.directory_id)
+			if directory:
+				directory_name = directory.name
+		
 		response_text += (
 			f"<b>{i}. {task_obj.title}</b>\n"
 			f"   ID: {task_obj.id}\n"
+			f"   📁 Директория: {directory_name}\n"
 			f"   Начало: {task_obj.time_start.strftime('%d.%m.%Y %H:%M') if task_obj.time_start else 'Не указано'}\n"
 			f"   Окончание: {task_obj.time_end.strftime('%d.%m.%Y %H:%M') if task_obj.time_end else 'Не указано'}\n"
 			f"   Описание: {task_obj.description or '-'}\n"
@@ -926,8 +935,10 @@ async def cmd_members_directory_selected(callback: CallbackQuery):
     
     response_text = f"👥 Участники директории '{dir_name}' (ID: {directory_id}):\n\n"
     for i, member in enumerate(members, 1):
-        # Не показываем ID пользователей другим пользователям
-        response_text += f"{i}. Пользователь\n"
+        # Показываем имя и username пользователя
+        name = member.first_name or "Неизвестно"
+        username = f"@{member.username}" if member.username else "Без username"
+        response_text += f"{i}. {name} ({username})\n"
     
     await callback.message.answer(response_text)
     await callback.answer()
@@ -1303,6 +1314,11 @@ async def cb_edit_task_time_clear(callback: CallbackQuery):
     await callback.message.answer("✅ Даты очищены" if ok else "❌ Не удалось обновить")
     await callback.answer()
 
+@router.callback_query(F.data == "noop")
+async def cb_noop(callback: CallbackQuery):
+    """Обработчик для кнопок без действия (заголовки календаря и т.д.)."""
+    await callback.answer()
+
 @router.callback_query(F.data.startswith("myinv_delete_"))
 async def cb_myinv_delete(callback: CallbackQuery):
     inv_id = int(callback.data.split('_')[-1])
@@ -1312,6 +1328,251 @@ async def cb_myinv_delete(callback: CallbackQuery):
     await callback.answer()
 
 # --- Команды общего назначения ---
+
+@router.message(Command("menu"))
+async def cmd_menu(message: Message):
+    """Интерактивное меню бота."""
+    builder = InlineKeyboardBuilder()
+    
+    # Директории
+    builder.button(text="📁 Директории", callback_data="menu_directories")
+    builder.button(text="📝 Задачи", callback_data="menu_tasks")
+    builder.button(text="👥 Приглашения", callback_data="menu_invitations")
+    builder.button(text="🏷️ Теги", callback_data="menu_tags")
+    builder.button(text="ℹ️ Информация", callback_data="menu_info")
+    builder.button(text="❓ Помощь", callback_data="menu_help")
+    builder.adjust(2)
+    
+    await message.answer(
+        "🤖 <b>Главное меню</b>\n\nВыберите раздел:",
+        parse_mode='HTML',
+        reply_markup=builder.as_markup()
+    )
+
+@router.callback_query(F.data == "menu_directories")
+async def cb_menu_directories(callback: CallbackQuery):
+    """Меню директорий."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Создать директорию", callback_data="menu_create_dir")
+    builder.button(text="📋 Список директорий", callback_data="menu_list_dirs")
+    builder.button(text="✏️ Редактировать", callback_data="menu_edit_dir")
+    builder.button(text="🗑️ Удалить", callback_data="menu_delete_dir")
+    builder.button(text="🔙 Назад", callback_data="menu_back")
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        "📁 <b>Управление директориями</b>\n\nВыберите действие:",
+        parse_mode='HTML',
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_tasks")
+async def cb_menu_tasks(callback: CallbackQuery):
+    """Меню задач."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Создать задачу", callback_data="menu_create_task")
+    builder.button(text="📋 Список задач", callback_data="menu_list_tasks")
+    builder.button(text="✏️ Редактировать", callback_data="menu_edit_task")
+    builder.button(text="🗑️ Удалить", callback_data="menu_delete_task")
+    builder.button(text="🔙 Назад", callback_data="menu_back")
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        "📝 <b>Управление задачами</b>\n\nВыберите действие:",
+        parse_mode='HTML',
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_invitations")
+async def cb_menu_invitations(callback: CallbackQuery):
+    """Меню приглашений."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Создать приглашение", callback_data="menu_invite")
+    builder.button(text="🔗 Присоединиться", callback_data="menu_join")
+    builder.button(text="👥 Участники", callback_data="menu_members")
+    builder.button(text="🚪 Покинуть", callback_data="menu_leave")
+    builder.button(text="📋 Мои приглашения", callback_data="menu_my_invitations")
+    builder.button(text="🔙 Назад", callback_data="menu_back")
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        "👥 <b>Управление приглашениями</b>\n\nВыберите действие:",
+        parse_mode='HTML',
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_tags")
+async def cb_menu_tags(callback: CallbackQuery):
+    """Меню тегов."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Добавить тег", callback_data="menu_add_tag")
+    builder.button(text="🔙 Назад", callback_data="menu_back")
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        "🏷️ <b>Управление тегами</b>\n\nВыберите действие:",
+        parse_mode='HTML',
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_info")
+async def cb_menu_info(callback: CallbackQuery):
+    """Меню информации."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="👤 Информация о себе", callback_data="menu_me")
+    builder.button(text="🔙 Назад", callback_data="menu_back")
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        "ℹ️ <b>Информация</b>\n\nВыберите действие:",
+        parse_mode='HTML',
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_help")
+async def cb_menu_help(callback: CallbackQuery):
+    """Меню помощи."""
+    help_text = (
+        "🤖 <b>Справка по командам</b>\n\n"
+        "📁 <b>Директории:</b>\n"
+        "/create_dir - Создать директорию\n"
+        "/list_dirs - Список директорий\n"
+        "/edit_dir - Редактировать директорию\n"
+        "/delete_dir - Удалить директорию\n\n"
+        "📝 <b>Задачи:</b>\n"
+        "/create_task - Создать задачу\n"
+        "/list_tasks - Список задач\n"
+        "/edit_task - Редактировать задачу\n"
+        "/delete_task - Удалить задачу\n\n"
+        "👥 <b>Приглашения:</b>\n"
+        "/invite - Создать приглашение\n"
+        "/join [код] - Присоединиться по коду\n"
+        "/members - Список участников\n"
+        "/leave - Покинуть директорию\n"
+        "/my_invitations - Мои приглашения\n\n"
+        "🏷️ <b>Теги:</b>\n"
+        "/add_tag - Добавить тег\n"
+        "/remove_tag [dir/task] [ID] [тег] - Удалить тег\n\n"
+        "ℹ️ <b>Общие:</b>\n"
+        "/start - Зарегистрироваться\n"
+        "/me - Информация о вас\n"
+        "/menu - Это меню\n"
+        "/help - Подробная справка"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Назад", callback_data="menu_back")
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        help_text,
+        parse_mode='HTML',
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_back")
+async def cb_menu_back(callback: CallbackQuery):
+    """Возврат в главное меню."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📁 Директории", callback_data="menu_directories")
+    builder.button(text="📝 Задачи", callback_data="menu_tasks")
+    builder.button(text="👥 Приглашения", callback_data="menu_invitations")
+    builder.button(text="🏷️ Теги", callback_data="menu_tags")
+    builder.button(text="ℹ️ Информация", callback_data="menu_info")
+    builder.button(text="❓ Помощь", callback_data="menu_help")
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        "🤖 <b>Главное меню</b>\n\nВыберите раздел:",
+        parse_mode='HTML',
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+# Обработчики для кнопок меню
+@router.callback_query(F.data == "menu_create_dir")
+async def cb_menu_create_dir(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите название новой директории:")
+    await state.set_state(DirectoryStates.waiting_for_name)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_list_dirs")
+async def cb_menu_list_dirs(callback: CallbackQuery):
+    await cmd_list_dirs(callback.message)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_edit_dir")
+async def cb_menu_edit_dir(callback: CallbackQuery, state: FSMContext):
+    await cmd_edit_dir_start(callback.message, state)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_delete_dir")
+async def cb_menu_delete_dir(callback: CallbackQuery, state: FSMContext):
+    await cmd_delete_dir_start(callback.message, state)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_create_task")
+async def cb_menu_create_task(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите название новой задачи:")
+    await state.set_state(TaskStates.waiting_for_title)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_list_tasks")
+async def cb_menu_list_tasks(callback: CallbackQuery):
+    await cmd_list_tasks(callback.message)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_edit_task")
+async def cb_menu_edit_task(callback: CallbackQuery, state: FSMContext):
+    await cmd_edit_task_start(callback.message, state)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_delete_task")
+async def cb_menu_delete_task(callback: CallbackQuery, state: FSMContext):
+    await cmd_delete_task_start(callback.message, state)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_invite")
+async def cb_menu_invite(callback: CallbackQuery, state: FSMContext):
+    await cmd_invite_start(callback.message, state)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_join")
+async def cb_menu_join(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите код приглашения:")
+    await state.set_state(JoinStates.waiting_for_code)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_members")
+async def cb_menu_members(callback: CallbackQuery):
+    await cmd_list_members(callback.message, CommandObject(args=None))
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_leave")
+async def cb_menu_leave(callback: CallbackQuery):
+    await cmd_leave_directory(callback.message, CommandObject(args=None))
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_my_invitations")
+async def cb_menu_my_invitations(callback: CallbackQuery):
+    await cmd_my_invitations(callback.message)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_add_tag")
+async def cb_menu_add_tag(callback: CallbackQuery, state: FSMContext):
+    await cmd_add_tag_start(callback.message, state)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_me")
+async def cb_menu_me(callback: CallbackQuery):
+    await on_me(callback.message)
+    await callback.answer()
 
 @router.message(Command("help"))
 async def on_help(message: Message):
@@ -1340,6 +1601,7 @@ async def on_help(message: Message):
         "ℹ️ <b>Общие команды:</b>\n"
         "/start - Зарегистрироваться\n"
         "/me - Информация о вас\n"
+        "/menu - Интерактивное меню\n"
         "/help - Это сообщение"
     )
     await message.answer(help_text, parse_mode='HTML')

@@ -76,13 +76,38 @@ async def get_user_tasks(telegram_id: int, directory_id: int | None = None) -> l
             if user is None:
                 return []
 
-            stmt_tasks = select(Task).where(Task.owner_id == user.id)
+            # Получаем задачи, где пользователь является владельцем
+            stmt_owned_tasks = select(Task).where(Task.owner_id == user.id)
             if directory_id:
-                stmt_tasks = stmt_tasks.where(Task.directory_id == directory_id)
+                stmt_owned_tasks = stmt_owned_tasks.where(Task.directory_id == directory_id)
+            
+            res_owned_tasks = await session.execute(stmt_owned_tasks)
+            owned_tasks = list(res_owned_tasks.scalars().all())
 
-            res_tasks = await session.execute(stmt_tasks)
-            rows = res_tasks.scalars().all()
-            return rows
+            # Получаем задачи в директориях, где пользователь является участником
+            from dtimebot.models.members import Member
+            stmt_member_tasks = (
+                select(Task)
+                .join(Member, Member.directory_id == Task.directory_id)
+                .where(
+                    Member.user_id == user.id,
+                    Member.is_active == True,
+                    Task.owner_id != user.id  # Исключаем задачи, которые пользователь уже видит как владелец
+                )
+            )
+            if directory_id:
+                stmt_member_tasks = stmt_member_tasks.where(Task.directory_id == directory_id)
+            
+            res_member_tasks = await session.execute(stmt_member_tasks)
+            member_tasks = list(res_member_tasks.scalars().all())
+
+            # Объединяем и убираем дубли
+            all_tasks = owned_tasks + member_tasks
+            unique_tasks = {}
+            for task in all_tasks:
+                unique_tasks[task.id] = task
+            
+            return list(unique_tasks.values())
     except SQLAlchemyError as e:
         logger.exception("Unexpected error while retrieving tasks for %s: %s", telegram_id, e)
         return []
@@ -130,7 +155,7 @@ async def delete_task(owner_telegram_id: int, task_id: int) -> bool:
 async def add_tag_to_task(owner_telegram_id: int, task_id: int, tag: str) -> bool:
 	"""
 	Добавляет тег к задаче.
-	:param owner_telegram_id: Telegram ID владельца задачи.
+	:param owner_telegram_id: Telegram ID пользователя (владельца задачи или участника директории).
 	:param task_id: ID задачи.
 	:param tag: Тег для добавления.
 	:return: True, если успешно, иначе False.
@@ -146,14 +171,21 @@ async def add_tag_to_task(owner_telegram_id: int, task_id: int, tag: str) -> boo
 				logger.warning(f"User with telegram_id={owner_telegram_id} not found.")
 				return False
 
-			# Найти задачу, принадлежащую этому пользователю
-			# Предполагаем, что Task.id соответствует Activity.id
-			stmt_task = select(Task).where(Task.id == task_id, Task.owner_id == user.id)
+			# Найти задачу с проверкой прав доступа (владелец задачи или участник директории)
+			from dtimebot.models.members import Member
+			stmt_task = (
+				select(Task)
+				.outerjoin(Member, (Member.directory_id == Task.directory_id) & (Member.user_id == user.id) & (Member.is_active == True))
+				.where(
+					(Task.id == task_id) & 
+					((Task.owner_id == user.id) | (Member.user_id == user.id))
+				)
+			)
 			result_task = await session.execute(stmt_task)
 			task = result_task.scalar_one_or_none()
 
 			if not task:
-				logger.warning(f"Task with ID={task_id} not found or does not belong to user {owner_telegram_id}.")
+				logger.warning(f"Task with ID={task_id} not found or user {owner_telegram_id} does not have access to it.")
 				return False
 
 			# Проверить, существует ли уже такой тег
@@ -185,7 +217,7 @@ async def add_tag_to_task(owner_telegram_id: int, task_id: int, tag: str) -> boo
 async def remove_tag_from_task(owner_telegram_id: int, task_id: int, tag: str) -> bool:
 	"""
 	Удаляет тег из задачи.
-	:param owner_telegram_id: Telegram ID владельца задачи.
+	:param owner_telegram_id: Telegram ID пользователя (владельца задачи или участника директории).
 	:param task_id: ID задачи.
 	:param tag: Тег для удаления.
 	:return: True, если успешно, иначе False.
@@ -201,13 +233,21 @@ async def remove_tag_from_task(owner_telegram_id: int, task_id: int, tag: str) -
 				logger.warning(f"User with telegram_id={owner_telegram_id} not found.")
 				return False
 
-			# Найти задачу, принадлежащую этому пользователю
-			stmt_task = select(Task).where(Task.id == task_id, Task.owner_id == user.id)
+			# Найти задачу с проверкой прав доступа (владелец задачи или участник директории)
+			from dtimebot.models.members import Member
+			stmt_task = (
+				select(Task)
+				.outerjoin(Member, (Member.directory_id == Task.directory_id) & (Member.user_id == user.id) & (Member.is_active == True))
+				.where(
+					(Task.id == task_id) & 
+					((Task.owner_id == user.id) | (Member.user_id == user.id))
+				)
+			)
 			result_task = await session.execute(stmt_task)
 			task = result_task.scalar_one_or_none()
 
 			if not task:
-				logger.warning(f"Task with ID={task_id} not found or does not belong to user {owner_telegram_id}.")
+				logger.warning(f"Task with ID={task_id} not found or user {owner_telegram_id} does not have access to it.")
 				return False
 
 			# Найти тег для удаления
@@ -238,7 +278,7 @@ async def remove_tag_from_task(owner_telegram_id: int, task_id: int, tag: str) -
 async def get_task_tags(owner_telegram_id: int, task_id: int) -> List[str]:
 	"""
 	Получает список тегов задачи.
-	:param owner_telegram_id: Telegram ID владельца задачи.
+	:param owner_telegram_id: Telegram ID пользователя (владельца задачи или участника директории).
 	:param task_id: ID задачи.
 	:return: Список тегов.
 	"""
@@ -253,13 +293,21 @@ async def get_task_tags(owner_telegram_id: int, task_id: int) -> List[str]:
 				logger.warning(f"User with telegram_id={owner_telegram_id} not found.")
 				return []
 
-			# Найти задачу, принадлежащую этому пользователю
-			stmt_task = select(Task).where(Task.id == task_id, Task.owner_id == user.id)
+			# Найти задачу с проверкой прав доступа (владелец задачи или участник директории)
+			from dtimebot.models.members import Member
+			stmt_task = (
+				select(Task)
+				.outerjoin(Member, (Member.directory_id == Task.directory_id) & (Member.user_id == user.id) & (Member.is_active == True))
+				.where(
+					(Task.id == task_id) & 
+					((Task.owner_id == user.id) | (Member.user_id == user.id))
+				)
+			)
 			result_task = await session.execute(stmt_task)
 			task = result_task.scalar_one_or_none()
 
 			if not task:
-				logger.warning(f"Task with ID={task_id} not found or does not belong to user {owner_telegram_id}.")
+				logger.warning(f"Task with ID={task_id} not found or user {owner_telegram_id} does not have access to it.")
 				return []
 
 			# Получить теги
@@ -279,7 +327,7 @@ async def get_task_tags(owner_telegram_id: int, task_id: int) -> List[str]:
 async def get_user_tasks_by_tag(owner_telegram_id: int, tag: str) -> List[Task]:
 	"""
 	Получает список задач пользователя, у которых есть указанный тег.
-	:param owner_telegram_id: Telegram ID владельца.
+	:param owner_telegram_id: Telegram ID пользователя (владельца задачи или участника директории).
 	:param tag: Тег для фильтрации.
 	:return: Список объектов Task.
 	"""
@@ -294,16 +342,27 @@ async def get_user_tasks_by_tag(owner_telegram_id: int, tag: str) -> List[Task]:
 				logger.warning(f"User with telegram_id={owner_telegram_id} not found.")
 				return []
 
-			# Найти задачи пользователя, у которых есть тег
+			# Найти задачи пользователя (владельца или участника директории), у которых есть тег
+			from dtimebot.models.members import Member
 			stmt_tasks = (
 				select(Task)
 				.join(TaskTag, Task.id == TaskTag.task_id)
-				.where(Task.owner_id == user.id, TaskTag.tag == tag)
+				.outerjoin(Member, (Member.directory_id == Task.directory_id) & (Member.user_id == user.id) & (Member.is_active == True))
+				.where(
+					TaskTag.tag == tag,
+					((Task.owner_id == user.id) | (Member.user_id == user.id))
+				)
 			)
 			result_tasks = await session.execute(stmt_tasks)
 			tasks = list(result_tasks.scalars().all())
-			logger.info(f"Found {len(tasks)} tasks with tag '{tag}' for user {owner_telegram_id}.")
-			return tasks
+			
+			# Убираем дубли
+			unique_tasks = {}
+			for task in tasks:
+				unique_tasks[task.id] = task
+			
+			logger.info(f"Found {len(unique_tasks)} tasks with tag '{tag}' for user {owner_telegram_id}.")
+			return list(unique_tasks.values())
 
 	except SQLAlchemyError as e:
 		logger.error(f"SQLAlchemy error while filtering tasks by tag '{tag}' for user {owner_telegram_id}: {e}", exc_info=True)
@@ -322,7 +381,7 @@ async def update_task(
 ) -> bool:
 	"""
 	Обновляет информацию о задаче.
-	:param owner_telegram_id: Telegram ID владельца задачи.
+	:param owner_telegram_id: Telegram ID пользователя (владельца задачи или участника директории).
 	:param task_id: ID задачи.
 	:param title: Новое название (None = не изменять).
 	:param description: Новое описание (None = не изменять).
@@ -341,13 +400,21 @@ async def update_task(
 				logger.warning(f"User with telegram_id={owner_telegram_id} not found.")
 				return False
 
-			# Найти задачу, принадлежащую этому пользователю
-			stmt_task = select(Task).where(Task.id == task_id, Task.owner_id == user.id)
+			# Найти задачу с проверкой прав доступа (владелец задачи или участник директории)
+			from dtimebot.models.members import Member
+			stmt_task = (
+				select(Task)
+				.outerjoin(Member, (Member.directory_id == Task.directory_id) & (Member.user_id == user.id) & (Member.is_active == True))
+				.where(
+					(Task.id == task_id) & 
+					((Task.owner_id == user.id) | (Member.user_id == user.id))
+				)
+			)
 			result_task = await session.execute(stmt_task)
 			task = result_task.scalar_one_or_none()
 
 			if not task:
-				logger.warning(f"Task with ID={task_id} not found or does not belong to user {owner_telegram_id}.")
+				logger.warning(f"Task with ID={task_id} not found or user {owner_telegram_id} does not have access to it.")
 				return False
 
 			# Обновляем поля
@@ -374,7 +441,7 @@ async def update_task(
 async def get_task_by_id(owner_telegram_id: int, task_id: int) -> Task | None:
 	"""
 	Получает задачу по ID с проверкой прав доступа.
-	:param owner_telegram_id: Telegram ID владельца.
+	:param owner_telegram_id: Telegram ID пользователя (владельца задачи или участника директории).
 	:param task_id: ID задачи.
 	:return: Объект Task или None.
 	"""
@@ -388,8 +455,16 @@ async def get_task_by_id(owner_telegram_id: int, task_id: int) -> Task | None:
 			if not user:
 				return None
 
-			# Найти задачу
-			stmt_task = select(Task).where(Task.id == task_id, Task.owner_id == user.id)
+			# Найти задачу с проверкой прав доступа (владелец задачи или участник директории)
+			from dtimebot.models.members import Member
+			stmt_task = (
+				select(Task)
+				.outerjoin(Member, (Member.directory_id == Task.directory_id) & (Member.user_id == user.id) & (Member.is_active == True))
+				.where(
+					(Task.id == task_id) & 
+					((Task.owner_id == user.id) | (Member.user_id == user.id))
+				)
+			)
 			result_task = await session.execute(stmt_task)
 			task = result_task.scalar_one_or_none()
 
