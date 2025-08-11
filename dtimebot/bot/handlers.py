@@ -5,6 +5,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from datetime import datetime as _dt
+from datetime import datetime
 
 from sqlalchemy import select
 from dtimebot.database import get_session
@@ -33,6 +35,11 @@ class TaskStates(StatesGroup):
     waiting_for_edit_value = State()
     waiting_for_tag = State()
     waiting_for_tag_action = State()  # add/remove
+    waiting_for_create_dir = State()
+    waiting_for_timeframe_choice = State()
+    waiting_for_time_start_text = State()
+    waiting_for_time_end_text = State()
+    waiting_for_tags_text = State()
 
 class InvitationStates(StatesGroup):
     waiting_for_directory = State()
@@ -304,6 +311,41 @@ async def cmd_delete_dir_selected(callback: CallbackQuery, state: FSMContext):
     
     await callback.answer()
 
+@router.callback_query(F.data.startswith("add_dir_tag_"))
+async def cb_add_dir_tag(callback: CallbackQuery, state: FSMContext):
+    directory_id = int(callback.data.split('_')[-1])
+    await state.update_data(obj_type='dir', obj_id=directory_id)
+    await callback.message.answer("Введите тег для добавления к директории:")
+    await state.set_state(DirectoryStates.waiting_for_tag)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("remove_dir_tag_"))
+async def cb_remove_dir_tag(callback: CallbackQuery, state: FSMContext):
+    directory_id = int(callback.data.split('_')[-1])
+    await state.update_data(obj_type='dir', obj_id=directory_id, tag_action='remove')
+    await callback.message.answer("Введите тег для удаления из директории:")
+    await state.set_state(DirectoryStates.waiting_for_tag_action)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("show_dir_tags_"))
+async def cb_show_dir_tags(callback: CallbackQuery):
+    directory_id = int(callback.data.split('_')[-1])
+    telegram_id = callback.from_user.id
+    tags = await directory_service.get_directory_tags(telegram_id, directory_id)
+    txt = ', '.join(tags) if tags else '—'
+    await callback.message.answer(f"Теги директории {directory_id}: {txt}")
+    await callback.answer()
+
+@router.message(DirectoryStates.waiting_for_tag_action, F.text)
+async def on_dir_tag_action_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    directory_id = data.get('obj_id')
+    tag = message.text.strip()
+    telegram_id = message.from_user.id
+    ok = await directory_service.remove_tag_from_directory(telegram_id, directory_id, tag)
+    await message.answer("✅ Готово" if ok else "❌ Не удалось")
+    await state.clear()
+
 @router.callback_query(F.data == "delete_dir_cancel")
 async def cmd_delete_dir_cancel(callback: CallbackQuery, state: FSMContext):
     """Отмена удаления директории."""
@@ -318,6 +360,133 @@ async def cmd_create_task_start(message: Message, state: FSMContext):
 	await message.answer("Введите название новой задачи:")
 	await state.set_state(TaskStates.waiting_for_title)
 
+@router.callback_query(F.data.startswith("create_task_dir_"))
+async def cmd_create_task_directory_selected(callback: CallbackQuery, state: FSMContext):
+    """Выбрана директория для создаваемой задачи — спросим про временные рамки."""
+    directory_id = int(callback.data.split('_')[-1])
+    await state.update_data(directory_id=directory_id)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⏰ Установить", callback_data="create_task_time_yes")
+    builder.button(text="⏭️ Пропустить", callback_data="create_task_time_no")
+    builder.adjust(2)
+    await callback.message.answer("Установить временные рамки для задачи?", reply_markup=builder.as_markup())
+    await state.set_state(TaskStates.waiting_for_timeframe_choice)
+    await callback.answer()
+
+@router.callback_query(F.data == "create_task_time_yes")
+async def cmd_create_task_time_yes(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите дату и время начала в формате ДД.ММ.ГГГГ ЧЧ:ММ, например 25.12.2025 09:00")
+    await state.set_state(TaskStates.waiting_for_time_start_text)
+    await callback.answer()
+
+@router.callback_query(F.data == "create_task_time_no")
+async def cmd_create_task_time_no(callback: CallbackQuery, state: FSMContext):
+    """Создаем задачу без временных рамок, затем предложим добавить теги."""
+    data = await state.get_data()
+    telegram_id = callback.from_user.id
+    title = data.get('title')
+    description = data.get('description')
+    directory_id = data.get('directory_id')
+    task = await task_service.create_task(telegram_id, title, description, directory_id=directory_id)
+    if task:
+        await state.update_data(created_task_id=task.id)
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏷️ Добавить теги", callback_data="create_task_add_tags")
+        builder.button(text="✅ Готово", callback_data="create_task_finish")
+        builder.adjust(2)
+        await callback.message.answer(f"✅ Задача создана (ID: {task.id}). Добавить теги?", reply_markup=builder.as_markup())
+    else:
+        await callback.message.answer("❌ Ошибка при создании задачи.")
+        await state.clear()
+    await callback.answer()
+
+def _parse_dt(text: str) -> _dt | None:
+    try:
+        from datetime import datetime as _dt
+        return _dt.strptime(text.strip(), "%d.%m.%Y %H:%M")
+    except Exception:
+        return None
+
+@router.message(TaskStates.waiting_for_time_start_text, F.text)
+async def cmd_create_task_time_start_text(message: Message, state: FSMContext):
+    value = _parse_dt(message.text)
+    if not value:
+        await message.answer("❌ Неверный формат. Пример: 25.12.2025 09:00")
+        return
+    await state.update_data(time_start=value)
+    await message.answer("Введите дату и время окончания (или отправьте /skip, чтобы оставить пустым) в формате ДД.ММ.ГГГГ ЧЧ:ММ")
+    await state.set_state(TaskStates.waiting_for_time_end_text)
+
+@router.message(TaskStates.waiting_for_time_end_text, Command("skip"))
+async def cmd_create_task_time_end_skip(message: Message, state: FSMContext):
+    data = await state.get_data()
+    telegram_id = message.from_user.id
+    title = data.get('title')
+    description = data.get('description')
+    directory_id = data.get('directory_id')
+    time_start = data.get('time_start')
+    task = await task_service.create_task(telegram_id, title, description, directory_id=directory_id, time_start=time_start)
+    if task:
+        await state.update_data(created_task_id=task.id)
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏷️ Добавить теги", callback_data="create_task_add_tags")
+        builder.button(text="✅ Готово", callback_data="create_task_finish")
+        builder.adjust(2)
+        await message.answer(f"✅ Задача создана (ID: {task.id}). Добавить теги?", reply_markup=builder.as_markup())
+    else:
+        await message.answer("❌ Ошибка при создании задачи.")
+        await state.clear()
+
+@router.message(TaskStates.waiting_for_time_end_text, F.text)
+async def cmd_create_task_time_end_text(message: Message, state: FSMContext):
+    value = _parse_dt(message.text)
+    if not value:
+        await message.answer("❌ Неверный формат. Пример: 25.12.2025 09:00")
+        return
+    data = await state.get_data()
+    telegram_id = message.from_user.id
+    title = data.get('title')
+    description = data.get('description')
+    directory_id = data.get('directory_id')
+    time_start = data.get('time_start')
+    task = await task_service.create_task(telegram_id, title, description, directory_id=directory_id, time_start=time_start, time_end=value)
+    if task:
+        await state.update_data(created_task_id=task.id)
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🏷️ Добавить теги", callback_data="create_task_add_tags")
+        builder.button(text="✅ Готово", callback_data="create_task_finish")
+        builder.adjust(2)
+        await message.answer(f"✅ Задача создана (ID: {task.id}). Добавить теги?", reply_markup=builder.as_markup())
+    else:
+        await message.answer("❌ Ошибка при создании задачи.")
+        await state.clear()
+
+@router.callback_query(F.data == "create_task_add_tags")
+async def cmd_create_task_add_tags(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите теги через запятую (например: важное, работа, срочно)")
+    await state.set_state(TaskStates.waiting_for_tags_text)
+    await callback.answer()
+
+@router.message(TaskStates.waiting_for_tags_text, F.text)
+async def cmd_create_task_tags_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    task_id = data.get('created_task_id')
+    telegram_id = message.from_user.id
+    raw = [t.strip() for t in message.text.split(',') if t.strip()]
+    added = 0
+    for tag in raw:
+        ok = await task_service.add_tag_to_task(telegram_id, task_id, tag)
+        if ok:
+            added += 1
+    await message.answer(f"Добавлено тегов: {added}")
+    await state.clear()
+
+@router.callback_query(F.data == "create_task_finish")
+async def cmd_create_task_finish(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Готово ✅")
+    await state.clear()
+    await callback.answer()
+
 @router.message(TaskStates.waiting_for_title, F.text)
 async def cmd_create_task_title_received(message: Message, state: FSMContext):
 	"""Получено название задачи, запрос описания."""
@@ -327,37 +496,39 @@ async def cmd_create_task_title_received(message: Message, state: FSMContext):
 
 @router.message(TaskStates.waiting_for_description, Command("skip"))
 async def cmd_create_task_skip_description(message: Message, state: FSMContext):
-	"""Пропуск описания и создание задачи."""
-	user_data = await state.get_data()
-	title = user_data['title']
-	description = ""
-	telegram_id = message.from_user.id
-
-	task = await task_service.create_task(telegram_id, title, description)
-	
-	if task:
-		await message.answer(f"✅ Задача '<b>{title}</b>' успешно создана! ID: {task.id}", parse_mode='HTML')
-	else:
-		await message.answer("❌ Ошибка при создании задачи. Попробуйте позже.")
-	
-	await state.clear()
+    """Пропуск описания и переход к выбору директории."""
+    await state.update_data(description="")
+    telegram_id = message.from_user.id
+    directories = await directory_service.get_user_directories(telegram_id)
+    if not directories:
+        await message.answer("📭 У вас нет доступных директорий. Сначала создайте /create_dir")
+        await state.clear()
+        return
+    builder = InlineKeyboardBuilder()
+    for dir_obj in directories:
+        postfix = " (личная)" if getattr(dir_obj, 'is_self', False) else ""
+        builder.button(text=f"{dir_obj.name}{postfix}", callback_data=f"create_task_dir_{dir_obj.id}")
+    builder.adjust(1)
+    await message.answer("Выберите директорию для задачи:", reply_markup=builder.as_markup())
+    await state.set_state(TaskStates.waiting_for_create_dir)
 
 @router.message(TaskStates.waiting_for_description, F.text)
 async def cmd_create_task_description_received(message: Message, state: FSMContext):
-	"""Получено описание, создание задачи."""
-	user_data = await state.get_data()
-	title = user_data['title']
-	description = message.text
-	telegram_id = message.from_user.id
-
-	task = await task_service.create_task(telegram_id, title, description)
-	
-	if task:
-		await message.answer(f"✅ Задача '<b>{title}</b>' успешно создана! ID: {task.id}\nОписание: {description}", parse_mode='HTML')
-	else:
-		await message.answer("❌ Ошибка при создании задачи. Попробуйте позже.")
-	
-	await state.clear()
+    """Получено описание — переходим к выбору директории."""
+    await state.update_data(description=message.text)
+    telegram_id = message.from_user.id
+    directories = await directory_service.get_user_directories(telegram_id)
+    if not directories:
+        await message.answer("📭 У вас нет доступных директорий. Сначала создайте /create_dir")
+        await state.clear()
+        return
+    builder = InlineKeyboardBuilder()
+    for dir_obj in directories:
+        postfix = " (личная)" if getattr(dir_obj, 'is_self', False) else ""
+        builder.button(text=f"{dir_obj.name}{postfix}", callback_data=f"create_task_dir_{dir_obj.id}")
+    builder.adjust(1)
+    await message.answer("Выберите директорию для задачи:", reply_markup=builder.as_markup())
+    await state.set_state(TaskStates.waiting_for_create_dir)
 
 @router.message(Command("list_tasks"))
 async def cmd_list_tasks(message: Message):
@@ -419,6 +590,7 @@ async def cmd_edit_task_selected(callback: CallbackQuery, state: FSMContext):
     builder = InlineKeyboardBuilder()
     builder.button(text="📝 Изменить название", callback_data=f"edit_task_title_{task_id}")
     builder.button(text="📄 Изменить описание", callback_data=f"edit_task_desc_{task_id}")
+    builder.button(text="⏰ Временные рамки", callback_data=f"edit_task_time_{task_id}")
     builder.button(text="🏷️ Управление тегами", callback_data=f"edit_task_tags_{task_id}")
     builder.adjust(1)
     
@@ -529,11 +701,52 @@ async def cmd_delete_task_selected(callback: CallbackQuery, state: FSMContext):
     
     await callback.answer()
 
+@router.callback_query(F.data.startswith("add_task_tag_"))
+async def cb_add_task_tag(callback: CallbackQuery, state: FSMContext):
+    task_id = int(callback.data.split('_')[-1])
+    await state.update_data(obj_type='task', obj_id=task_id)
+    await callback.message.answer("Введите тег для добавления к задаче:")
+    await state.set_state(TaskStates.waiting_for_tag)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("remove_task_tag_"))
+async def cb_remove_task_tag(callback: CallbackQuery, state: FSMContext):
+    task_id = int(callback.data.split('_')[-1])
+    await state.update_data(obj_type='task', obj_id=task_id, tag_action='remove')
+    await callback.message.answer("Введите тег для удаления из задачи:")
+    await state.set_state(TaskStates.waiting_for_tag_action)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("show_task_tags_"))
+async def cb_show_task_tags(callback: CallbackQuery):
+    task_id = int(callback.data.split('_')[-1])
+    telegram_id = callback.from_user.id
+    tags = await task_service.get_task_tags(telegram_id, task_id)
+    txt = ', '.join(tags) if tags else '—'
+    await callback.message.answer(f"Теги задачи {task_id}: {txt}")
+    await callback.answer()
+
+@router.message(TaskStates.waiting_for_tag_action, F.text)
+async def on_tag_action_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    obj_type = data.get('obj_type')
+    obj_id = data.get('obj_id')
+    tag = message.text.strip()
+    telegram_id = message.from_user.id
+    ok = False
+    if obj_type == 'task':
+        ok = await task_service.remove_tag_from_task(telegram_id, obj_id, tag)
+    elif obj_type == 'dir':
+        ok = await directory_service.remove_tag_from_directory(telegram_id, obj_id, tag)
+    await message.answer("✅ Готово" if ok else "❌ Не удалось")
+    await state.clear()
+
 @router.callback_query(F.data == "delete_task_cancel")
 async def cmd_delete_task_cancel(callback: CallbackQuery, state: FSMContext):
     """Отмена удаления задачи."""
     await callback.message.answer("❌ Удаление отменено.")
     await callback.answer()
+
 
 # --- Команды для работы с приглашениями ---
 
@@ -542,7 +755,7 @@ async def cmd_invite_start(message: Message, state: FSMContext):
     """Начало создания приглашения: выбор директории."""
     telegram_id = message.from_user.id
     
-    directories = await directory_service.get_user_directories(telegram_id)
+    directories = await directory_service.get_owned_directories(telegram_id)
     
     if not directories:
         await message.answer("📭 У вас нет директорий для создания приглашений.")
@@ -793,7 +1006,7 @@ async def cmd_add_tag_dir_selected(callback: CallbackQuery, state: FSMContext):
     """Выбрано добавление тега к директории."""
     telegram_id = callback.from_user.id
     
-    directories = await directory_service.get_user_directories(telegram_id)
+    directories = await directory_service.get_owned_directories(telegram_id)
     
     if not directories:
         await callback.message.answer("📭 У вас нет директорий для добавления тегов.")
@@ -932,45 +1145,171 @@ async def cmd_remove_tag_start(message: Message, command: CommandObject):
 
 @router.message(Command("my_invitations"))
 async def cmd_my_invitations(message: Message):
-    """Показать директории, куда приглашен пользователь."""
+    """Показать директории пользователя и его приглашения; дать управление инвайтами."""
     telegram_id = message.from_user.id
-    
-    # Получаем все директории пользователя
-    user_directories = await directory_service.get_user_directories(telegram_id)
-    
-    if not user_directories:
-        await message.answer("📭 У вас нет директорий.")
-        return
+    directories = await directory_service.get_user_directories(telegram_id)
+    from dtimebot.database import get_session
+    async with get_session() as session:
+        from sqlalchemy import select
+        from dtimebot.models.users import User as _User
+        res_user = await session.execute(select(_User).where(_User.telegram_id == telegram_id))
+        user = res_user.scalar_one_or_none()
+        user_id = user.id if user else None
+    owned_dirs = [d for d in directories if not d.is_self and d.owner_id == user_id]
+    member_dirs = [d for d in directories if not d.is_self and d.owner_id != user_id]
 
-    # Разделяем на владельца и участника
-    owned_dirs = []
-    member_dirs = []
-    
-    for dir_obj in user_directories:
-        if dir_obj.is_self:
-            continue  # Пропускаем личные директории
-        elif dir_obj.owner_id == telegram_id:
-            owned_dirs.append(dir_obj)
-        else:
-            member_dirs.append(dir_obj)
-
-    response_text = "📁 <b>Ваши директории:</b>\n\n"
-    
+    response_text = "📁 <b>Ваши директории</b>\n\n"
     if owned_dirs:
-        response_text += "👑 <b>Директории, которыми вы владеете:</b>\n"
-        for dir_obj in owned_dirs:
-            response_text += f"• {dir_obj.name} (ID: {dir_obj.id})\n"
-        response_text += "\n"
-    
+        response_text += "👑 <b>Вы владелец:</b>\n" + "\n".join([f"• {d.name} (ID: {d.id})" for d in owned_dirs]) + "\n\n"
     if member_dirs:
-        response_text += "👥 <b>Директории, в которые вы приглашены:</b>\n"
-        for dir_obj in member_dirs:
-            response_text += f"• {dir_obj.name} (ID: {dir_obj.id})\n"
+        response_text += "👥 <b>Вы участник:</b>\n" + "\n".join([f"• {d.name} (ID: {d.id})" for d in member_dirs]) + "\n\n"
+    invs = await invitation_service.get_user_invitations(telegram_id)
+    response_text += "🔑 <b>Ваши приглашения:</b>\n"
+    if invs:
+        for inv in invs:
+            exp = inv.valid_until.strftime('%d.%m.%Y %H:%M') if inv.valid_until else 'бессрочно'
+            lim = str(inv.max_uses) if inv.max_uses else '∞'
+            used = inv.used_count
+            response_text += f"• Код <code>{inv.code}</code> → dir {inv.directory_id}, истекает: {exp}, использ.: {used}/{lim}\n"
     else:
-        response_text += "👥 <b>Директории, в которые вы приглашены:</b>\n"
-        response_text += "Пока нет приглашений в другие директории.\n"
-    
-    await message.answer(response_text, parse_mode='HTML')
+        response_text += "Пока нет созданных приглашений.\n"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Создать приглашение", callback_data="myinv_create")
+    if invs:
+        for inv in invs:
+            builder.button(text=f"Удалить {inv.code}", callback_data=f"myinv_delete_{inv.id}")
+    builder.adjust(1)
+    await message.answer(response_text, parse_mode='HTML', reply_markup=builder.as_markup())
+
+@router.callback_query(F.data == "myinv_create")
+async def cb_myinv_create(callback: CallbackQuery, state: FSMContext):
+    telegram_id = callback.from_user.id
+    directories = await directory_service.get_owned_directories(telegram_id)
+    if not directories:
+        await callback.message.answer("У вас нет директорий для создания приглашений.")
+        await callback.answer()
+        return
+    builder = InlineKeyboardBuilder()
+    for d in directories:
+        if not d.is_self:
+            builder.button(text=f"{d.name} (ID: {d.id})", callback_data=f"invite_dir_select_{d.id}")
+    builder.button(text="❌ Отмена", callback_data="invite_cancel")
+    builder.adjust(1)
+    await callback.message.answer("Выберите директорию:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("edit_task_time_"))
+async def cb_edit_task_time_menu(callback: CallbackQuery):
+    task_id = int(callback.data.split('_')[-1])
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Установить начало", callback_data=f"edit_task_time_start_{task_id}")
+    builder.button(text="Установить конец", callback_data=f"edit_task_time_end_{task_id}")
+    builder.button(text="Очистить даты", callback_data=f"edit_task_time_clear_{task_id}")
+    builder.adjust(1)
+    await callback.message.answer("Выберите действие:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+def build_calendar(year: int, month: int, prefix: str, task_id: int) -> InlineKeyboardMarkup:
+    import calendar
+    cal = calendar.Calendar(firstweekday=0)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="<", callback_data=f"{prefix}_cal_prev_{task_id}_{year}_{month}")
+    builder.button(text=f"{calendar.month_name[month]} {year}", callback_data="noop")
+    builder.button(text=">", callback_data=f"{prefix}_cal_next_{task_id}_{year}_{month}")
+    builder.adjust(3)
+    week_days = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
+    for wd in week_days:
+        builder.button(text=wd, callback_data="noop")
+    builder.adjust(7)
+    for week in cal.monthdayscalendar(year, month):
+        for day in week:
+            if day == 0:
+                builder.button(text=" ", callback_data="noop")
+            else:
+                builder.button(text=str(day), callback_data=f"{prefix}_cal_pick_{task_id}_{year}_{month}_{day}")
+        builder.adjust(7)
+    return builder.as_markup()
+
+def _shift_month(year: int, month: int, delta: int) -> tuple[int,int]:
+    m = month + delta
+    y = year + (m-1)//12
+    m = (m-1)%12 + 1
+    return y, m
+
+@router.callback_query(F.data.startswith("edit_task_time_start_"))
+async def cb_edit_task_time_start(callback: CallbackQuery):
+    task_id = int(callback.data.split('_')[-1])
+    now = _dt.utcnow()
+    await callback.message.answer("Выберите дату начала:", reply_markup=build_calendar(now.year, now.month, "ets", task_id))
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("edit_task_time_end_"))
+async def cb_edit_task_time_end(callback: CallbackQuery):
+    task_id = int(callback.data.split('_')[-1])
+    now = _dt.utcnow()
+    await callback.message.answer("Выберите дату окончания:", reply_markup=build_calendar(now.year, now.month, "ete", task_id))
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("ets_cal_prev_") | F.data.startswith("ets_cal_next_") | F.data.startswith("ete_cal_prev_") | F.data.startswith("ete_cal_next_"))
+async def cb_calendar_nav(callback: CallbackQuery):
+    parts = callback.data.split('_')
+    prefix = parts[0]  # ets or ete
+    direction = parts[2]
+    task_id = int(parts[3])
+    year = int(parts[4])
+    month = int(parts[5])
+    delta = -1 if direction == 'prev' else 1
+    y, m = _shift_month(year, month, delta)
+    await callback.message.edit_reply_markup(reply_markup=build_calendar(y, m, prefix, task_id))
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("ets_cal_pick_") | F.data.startswith("ete_cal_pick_"))
+async def cb_calendar_pick_date(callback: CallbackQuery):
+    parts = callback.data.split('_')
+    prefix = parts[0]  # ets or ete
+    task_id = int(parts[3])
+    y = int(parts[4]); m = int(parts[5]); d = int(parts[6])
+    builder = InlineKeyboardBuilder()
+    for hour in (9, 12, 15, 18, 21):
+        builder.button(text=f"{hour:02d}:00", callback_data=f"{prefix}_time_{task_id}_{y}_{m}_{d}_{hour}_0")
+        builder.button(text=f"{hour:02d}:30", callback_data=f"{prefix}_time_{task_id}_{y}_{m}_{d}_{hour}_30")
+    builder.adjust(2)
+    await callback.message.answer("Выберите время:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("ets_time_") | F.data.startswith("ete_time_"))
+async def cb_calendar_pick_time(callback: CallbackQuery):
+    parts = callback.data.split('_')
+    prefix = parts[0]
+    task_id = int(parts[2])
+    y = int(parts[3]); m = int(parts[4]); d = int(parts[5]); hh = int(parts[6]); mm = int(parts[7])
+    dt = _dt(year=y, month=m, day=d, hour=hh, minute=mm)
+    telegram_id = callback.from_user.id
+    if prefix == 'ets':
+        ok = await task_service.update_task(telegram_id, task_id, time_start=dt)
+        txt = "Начало"
+    else:
+        ok = await task_service.update_task(telegram_id, task_id, time_end=dt)
+        txt = "Конец"
+    await callback.message.answer(("✅ " + txt + " обновлено: " + dt.strftime('%d.%m.%Y %H:%M')) if ok else "❌ Не удалось обновить дату")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("edit_task_time_clear_"))
+async def cb_edit_task_time_clear(callback: CallbackQuery):
+    task_id = int(callback.data.split('_')[-1])
+    telegram_id = callback.from_user.id
+    ok = await task_service.update_task(telegram_id, task_id, time_start=None, time_end=None)
+    await callback.message.answer("✅ Даты очищены" if ok else "❌ Не удалось обновить")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("myinv_delete_"))
+async def cb_myinv_delete(callback: CallbackQuery):
+    inv_id = int(callback.data.split('_')[-1])
+    telegram_id = callback.from_user.id
+    ok = await invitation_service.delete_invitation(telegram_id, inv_id)
+    await callback.message.answer("✅ Приглашение удалено" if ok else "❌ Не удалось удалить приглашение")
+    await callback.answer()
 
 # --- Команды общего назначения ---
 

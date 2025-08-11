@@ -318,3 +318,32 @@ async def get_user_invitations(owner_telegram_id: int) -> List[Invitation]:
     except Exception as e:
         logger.error(f"Unexpected error while getting user invitations: {e}", exc_info=True)
         return []
+
+async def delete_invitation(owner_telegram_id: int, invitation_id: int) -> bool:
+    """
+    Удаляет приглашение, если оно принадлежит пользователю.
+    """
+    try:
+        async with get_session() as session:
+            stmt_user = select(User).where(User.telegram_id == owner_telegram_id)
+            res_user = await session.execute(stmt_user)
+            user = res_user.scalar_one_or_none()
+            if not user:
+                return False
+
+            stmt_inv = select(Invitation).where(Invitation.id == invitation_id, Invitation.owner_id == user.id)
+            res_inv = await session.execute(stmt_inv)
+            invitation = res_inv.scalar_one_or_none()
+            if not invitation:
+                return False
+
+            await session.delete(invitation)
+            await session.commit()
+            logger.info(f"Invitation {invitation_id} deleted by {owner_telegram_id}")
+            return True
+    except SQLAlchemyError as e:
+        logger.error(f"SQLAlchemy error while deleting invitation {invitation_id}: {e}", exc_info=True)
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error while deleting invitation {invitation_id}: {e}", exc_info=True)
+        return False

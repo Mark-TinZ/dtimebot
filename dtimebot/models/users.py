@@ -12,3 +12,5 @@ class User(Base):
 	telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
 	created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
 	deleted_at: Mapped[Optional[DateTime]] = mapped_column(DateTime)
+	first_name: Mapped[Optional[str]] = mapped_column(nullable=True)
+	username: Mapped[Optional[str]] = mapped_column(nullable=True)

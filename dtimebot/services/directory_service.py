@@ -15,90 +15,110 @@ from dtimebot.logs import main_logger
 logger = main_logger.getChild('directory_service')
 
 async def create_directory(telegram_id: int, name: str, description: str | None = None, owner_user: User | None = None, is_self: bool = False) -> Directory | None:
-    """
-    Создать директорию. Если owner_user не передан — попытаемся получить пользователя по telegram_id.
-    is_self=True — пометить директорию как личную (удалять нельзя).
-    """
-    try:
-        async with get_session() as session:
-            # Получаем/передаём владельца
-            if owner_user is None:
-                stmt_user = select(User).where(User.telegram_id == telegram_id)
-                res = await session.execute(stmt_user)
-                owner_user = res.scalar_one_or_none()
-                if owner_user is None:
-                    logger.warning("User not found for telegram_id=%s while creating directory", telegram_id)
-                    return None
+	"""
+	Создать директорию. Если owner_user не передан — попытаемся получить пользователя по telegram_id.
+	is_self=True — пометить директорию как личную (удалять нельзя).
+	"""
+	try:
+		async with get_session() as session:
+			# Получаем/передаём владельца
+			if owner_user is None:
+				stmt_user = select(User).where(User.telegram_id == telegram_id)
+				res = await session.execute(stmt_user)
+				owner_user = res.scalar_one_or_none()
+				if owner_user is None:
+					logger.warning("User not found for telegram_id=%s while creating directory", telegram_id)
+					return None
 
-            # Проверка — не создаём дубликат self-директории
-            if is_self:
-                stmt_check = select(Directory).where(Directory.owner_id == owner_user.id, Directory.is_self == True)
-                res = await session.execute(stmt_check)
-                existing = res.scalar_one_or_none()
-                if existing:
-                    return existing
+			# Проверка — не создаём дубликат self-директории
+			if is_self:
+				stmt_check = select(Directory).where(Directory.owner_id == owner_user.id, Directory.is_self == True)
+				res = await session.execute(stmt_check)
+				existing = res.scalar_one_or_none()
+				if existing:
+					return existing
 
-            directory = Directory(
-                owner_id=owner_user.id,
-                name=name,
-                description=description,
-                is_self=is_self
-            )
-            session.add(directory)
-            await session.commit()
-            await session.refresh(directory)
+			directory = Directory(
+				owner_id=owner_user.id,
+				name=name,
+				description=description,
+				is_self=is_self
+			)
+			session.add(directory)
+			await session.commit()
+			await session.refresh(directory)
 
-            # Добавим запись в Member (владелец — участник)
-            member = Member(directory_id=directory.id, user_id=owner_user.id, is_active=True)
-            session.add(member)
-            await session.commit()
+			# Добавим запись в Member (владелец — участник)
+			member = Member(directory_id=directory.id, user_id=owner_user.id, is_active=True)
+			session.add(member)
+			await session.commit()
 
-            logger.info("Directory created id=%s owner=%s is_self=%s", directory.id, owner_user.telegram_id, is_self)
-            return directory
-    except SQLAlchemyError as e:
-        logger.exception("An unexpected error occurred while creating directory for %s: %s", telegram_id, e)
-        return None
+			logger.info("Directory created id=%s owner=%s is_self=%s", directory.id, owner_user.telegram_id, is_self)
+			return directory
+	except SQLAlchemyError as e:
+		logger.exception("An unexpected error occurred while creating directory for %s: %s", telegram_id, e)
+		return None
 
 async def get_user_directories(telegram_id: int) -> list[Directory]:
-    try:
-        async with get_session() as session:
-            # Найдём user.id
-            stmt_user = select(User).where(User.telegram_id == telegram_id)
-            res = await session.execute(stmt_user)
-            user = res.scalar_one_or_none()
-            if user is None:
-                return []
+	"""
+	Вернуть все директории, доступные пользователю, по членству (включая свои).
+	"""
+	try:
+		async with get_session() as session:
+			# Найдём user.id
+			stmt_user = select(User).where(User.telegram_id == telegram_id)
+			res = await session.execute(stmt_user)
+			user = res.scalar_one_or_none()
+			if user is None:
+				return []
 
-            stmt = select(Directory).where(Directory.owner_id == user.id)
-            res = await session.execute(stmt)
-            rows = res.scalars().all()
-            return rows
-    except SQLAlchemyError as e:
-        logger.exception("An unexpected error occurred while retrieving directories for %s: %s", telegram_id, e)
-        return []
+			# Директории, где пользователь является активным участником (включая владельца)
+			stmt = (
+				select(Directory)
+				.join(Member, Member.directory_id == Directory.id)
+				.where(Member.user_id == user.id, Member.is_active == True)
+			)
+			res = await session.execute(stmt)
+			rows = list(res.scalars().all())
+
+			# Убираем дубли по id
+			unique_by_id: dict[int, Directory] = {}
+			for d in rows:
+				unique_by_id[d.id] = d
+			return list(unique_by_id.values())
+	except SQLAlchemyError as e:
+		logger.exception("An unexpected error occurred while retrieving directories for %s: %s", telegram_id, e)
+		return []
 
 async def delete_directory(telegram_id: int, directory_id: int) -> bool:
-    """
-    Удаление директории — запрещено, если is_self=True.
-    """
-    try:
-        async with get_session() as session:
-            stmt = select(Directory).where(Directory.id == directory_id)
-            res = await session.execute(stmt)
-            directory = res.scalar_one_or_none()
-            if directory is None:
-                return False
+	"""
+	Удаление директории — запрещено, если is_self=True. Допускается только владельцу.
+	"""
+	try:
+		async with get_session() as session:
+			# Определяем пользователя
+			stmt_user = select(User).where(User.telegram_id == telegram_id)
+			res_user = await session.execute(stmt_user)
+			user = res_user.scalar_one_or_none()
+			if user is None:
+				return False
 
-            if directory.is_self:
-                logger.warning("Attempt to delete self directory id=%s by telegram=%s", directory_id, telegram_id)
-                return False
+			stmt = select(Directory).where(Directory.id == directory_id, Directory.owner_id == user.id)
+			res = await session.execute(stmt)
+			directory = res.scalar_one_or_none()
+			if directory is None:
+				return False
 
-            await session.delete(directory)
-            await session.commit()
-            return True
-    except SQLAlchemyError as e:
-        logger.exception("Error deleting directory %s: %s", directory_id, e)
-        return False
+			if directory.is_self:
+				logger.warning("Attempt to delete self directory id=%s by telegram=%s", directory_id, telegram_id)
+				return False
+
+			await session.delete(directory)
+			await session.commit()
+			return True
+	except SQLAlchemyError as e:
+		logger.exception("Error deleting directory %s: %s", directory_id, e)
+		return False
 
 
 async def add_tag_to_directory(owner_telegram_id: int, directory_id: int, tag: str) -> bool:
@@ -355,10 +375,29 @@ async def get_directory_by_id(owner_telegram_id: int, directory_id: int) -> Dire
 			directory = result_dir.scalar_one_or_none()
 
 			return directory
-
 	except SQLAlchemyError as e:
 		logger.error(f"Ошибка SQLAlchemy при получении директории {directory_id}: {e}", exc_info=True)
 		return None
 	except Exception as e:
 		logger.error(f"Неожиданная ошибка при получении директории {directory_id}: {e}", exc_info=True)
 		return None
+
+
+async def get_owned_directories(telegram_id: int) -> list[Directory]:
+	"""
+	Вернуть директории, где пользователь является владельцем.
+	"""
+	try:
+		async with get_session() as session:
+			stmt_user = select(User).where(User.telegram_id == telegram_id)
+			res_user = await session.execute(stmt_user)
+			user = res_user.scalar_one_or_none()
+			if not user:
+				return []
+
+			stmt = select(Directory).where(Directory.owner_id == user.id)
+			res = await session.execute(stmt)
+			return list(res.scalars().all())
+	except SQLAlchemyError as e:
+		logger.exception("An unexpected error occurred while retrieving owned directories for %s: %s", telegram_id, e)
+		return []

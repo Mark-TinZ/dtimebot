@@ -21,7 +21,9 @@ async def get_or_create_user(tg_user) -> User | None:
                 return user
 
             user = User(
-                telegram_id=tg_user.id
+                telegram_id=tg_user.id,
+                first_name=getattr(tg_user, 'first_name', None),
+                username=getattr(tg_user, 'username', None)
             )
             session.add(user)
             await session.commit()
